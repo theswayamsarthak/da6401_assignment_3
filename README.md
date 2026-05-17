@@ -195,13 +195,4 @@ Tokenised using spaCy (`de_core_news_sm` for German, `en_core_web_sm` for Englis
 
 ---
 
-## References
-
-1. Vaswani et al. (2017). *Attention Is All You Need.* NeurIPS.
-2. Xiong et al. (2020). *On Layer Normalization in the Transformer Architecture.* ICML.
-3. Clark et al. (2019). *What Does BERT Look At?* ACL BlackboxNLP.
-4. Müller et al. (2019). *When Does Label Smoothing Help?* NeurIPS.
-
----
-
 *Course: DA6401 · IIT Madras · Assignment 3*
