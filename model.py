@@ -571,3 +571,74 @@ class Transformer(nn.Module):
         """
         memory = self.encode(src, src_mask)
         return self.decode(memory, src_mask, tgt, tgt_mask)
+
+    def infer(self, src_text: str, max_len: int = 128) -> str:
+        """
+        Translate a raw German string to English.
+
+        Called by the autograder as:  model.infer(src_text) -> str
+
+        Requires that  model.src_vocab, model.tgt_vocab, and
+        model.src_tokenizer  were attached after loading the checkpoint
+        (done automatically by load_checkpoint_for_infer below), OR that
+        the model was loaded via the helper in train.py.
+
+        Args:
+            src_text : Raw German sentence string.
+            max_len  : Maximum output length in tokens.
+
+        Returns:
+            Translated English sentence as a plain string.
+        """
+        import torch
+
+        self.eval()
+        device = next(self.parameters()).device
+
+        # ── 1. Tokenise source ────────────────────────────────────────
+        # src_tokenizer, src_vocab, tgt_vocab must be attached to the
+        # model after loading.  See load_checkpoint_for_infer() below.
+        tokens = [t.text.lower() for t in self.src_tokenizer(src_text.strip())]
+
+        # ── 2. Encode to indices  [SOS, tok1, tok2, ..., EOS] ────────
+        UNK = self.src_vocab.stoi.get("<unk>", 0)
+        SOS = self.src_vocab.stoi.get("<sos>", 2)
+        EOS = self.src_vocab.stoi.get("<eos>", 3)
+        PAD = self.src_vocab.stoi.get("<pad>", 1)
+
+        src_ids = [SOS] + [self.src_vocab.stoi.get(t, UNK) for t in tokens] + [EOS]
+        src = torch.tensor([src_ids], dtype=torch.long, device=device)  # (1, S)
+        src_mask = (src == PAD).unsqueeze(1).unsqueeze(2)               # (1,1,1,S)
+
+        # ── 3. Greedy decode ──────────────────────────────────────────
+        tgt_SOS = self.tgt_vocab.stoi.get("<sos>", 2)
+        tgt_EOS = self.tgt_vocab.stoi.get("<eos>", 3)
+        tgt_PAD = self.tgt_vocab.stoi.get("<pad>", 1)
+
+        memory = self.encode(src, src_mask)
+        ys = torch.tensor([[tgt_SOS]], dtype=torch.long, device=device)
+
+        with torch.no_grad():
+            for _ in range(max_len - 1):
+                tgt_len = ys.size(1)
+                causal = torch.triu(
+                    torch.ones(tgt_len, tgt_len, device=device, dtype=torch.bool),
+                    diagonal=1,
+                ).unsqueeze(0).unsqueeze(0)
+                pad_m = (ys == tgt_PAD).unsqueeze(1).unsqueeze(2)
+                tgt_mask = causal | pad_m
+
+                logits   = self.decode(memory, src_mask, ys, tgt_mask)
+                next_tok = logits[:, -1, :].argmax(dim=-1, keepdim=True)
+                ys = torch.cat([ys, next_tok], dim=1)
+                if next_tok.item() == tgt_EOS:
+                    break
+
+        # ── 4. Decode indices back to string ─────────────────────────
+        special = {tgt_SOS, tgt_EOS, tgt_PAD}
+        out_tokens = [
+            self.tgt_vocab.itos[idx]
+            for idx in ys.squeeze(0).tolist()
+            if idx not in special and idx < len(self.tgt_vocab.itos)
+        ]
+        return " ".join(out_tokens)
