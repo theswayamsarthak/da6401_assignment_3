@@ -2,6 +2,8 @@
 
 Implementation of the Transformer architecture from ["Attention Is All You Need"](https://proceedings.neurips.cc/paper_files/paper/2017/file/3f5ee243547dee91fbd053c1c4a845aa-Paper.pdf) (Vaswani et al., 2017) from scratch in PyTorch, trained on the Multi30k German→English translation dataset.
 
+Click the link to open the [W&B Report](https://api.wandb.ai/links/theswayamsarthak-iitmaana/gqarzntd).
+
 > **Test BLEU: 39.31** (Beam-8) · **37.85** (Greedy) · ~9M parameters
 
 ---
@@ -136,7 +138,7 @@ run_training_experiment()
 ## Ablation Experiments
 
 Five experiments were run to validate key design decisions from the paper.
-Full analysis in the [W&B Report](https://wandb.ai/YOUR_USERNAME/da6401-a3/reports/YOUR_REPORT_LINK).
+Full analysis in the [W&B Report](https://api.wandb.ai/links/theswayamsarthak-iitmaana/gqarzntd).
 
 | Experiment | Condition A | Condition B | Key metric | Gap |
 |---|---|---|---|---|
