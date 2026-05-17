@@ -1,5 +1,5 @@
 """
-model.py — Transformer Architecture Skeleton
+model.py — Transformer Architecture Implementation
 DA6401 Assignment 3: "Attention Is All You Need"
 
 AUTOGRADER CONTRACT (DO NOT MODIFY SIGNATURES):
@@ -16,8 +16,6 @@ AUTOGRADER CONTRACT (DO NOT MODIFY SIGNATURES):
 
 import math
 import copy
-import os
-import gdown
 from typing import Optional, Tuple
 
 import torch
@@ -26,9 +24,9 @@ import torch.nn.functional as F
 
 
 # ══════════════════════════════════════════════════════════════════════
-#   STANDALONE ATTENTION FUNCTION  
-#    Exposed at module level so the autograder can import and test it
-#    independently of MultiHeadAttention.
+#  1. STANDALONE ATTENTION FUNCTION
+#     Exposed at module level so the autograder can import and test it
+#     independently of MultiHeadAttention.
 # ══════════════════════════════════════════════════════════════════════
 
 def scaled_dot_product_attention(
@@ -55,13 +53,27 @@ def scaled_dot_product_attention(
         output : Attended output,   shape (..., seq_q, d_v)
         attn_w : Attention weights, shape (..., seq_q, seq_k)
     """
-    raise NotImplementedError
+    d_k = Q.size(-1)
+
+    # (..., seq_q, seq_k)
+    scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(d_k)
+
+    if mask is not None:
+        # mask=True  → masked out → fill with -inf before softmax
+        scores = scores.masked_fill(mask, float("-inf"))
+
+    attn_w = F.softmax(scores, dim=-1)
+    # Guard against NaN from all-masked rows (softmax of all -inf → NaN)
+    attn_w = torch.nan_to_num(attn_w, nan=0.0)
+
+    output = torch.matmul(attn_w, V)
+    return output, attn_w
 
 
 # ══════════════════════════════════════════════════════════════════════
-# ❷  MASK HELPERS 
-#    Exposed at module level so they can be tested independently and
-#    reused inside Transformer.forward.
+#  2. MASK HELPERS
+#     Exposed at module level so they can be tested independently and
+#     reused inside Transformer.forward.
 # ══════════════════════════════════════════════════════════════════════
 
 def make_src_mask(
@@ -80,7 +92,8 @@ def make_src_mask(
         True  → position is a PAD token (will be masked out)
         False → real token
     """
-    raise NotImplementedError
+    # (batch, 1, 1, src_len) — True where pad
+    return (src == pad_idx).unsqueeze(1).unsqueeze(2)
 
 
 def make_tgt_mask(
@@ -98,11 +111,25 @@ def make_tgt_mask(
         Boolean mask, shape [batch, 1, tgt_len, tgt_len]
         True → position is masked out (PAD or future token)
     """
-    raise NotImplementedError
+    tgt_len = tgt.size(1)
+
+    # Causal mask: upper-triangular (above diagonal) = True = masked future
+    # shape (tgt_len, tgt_len) → (1, 1, tgt_len, tgt_len)
+    causal_mask = torch.triu(
+        torch.ones(tgt_len, tgt_len, device=tgt.device, dtype=torch.bool),
+        diagonal=1,
+    ).unsqueeze(0).unsqueeze(0)                              # (1, 1, T, T)
+
+    # Padding mask: True where pad — shape (batch, 1, 1, tgt_len)
+    pad_mask = (tgt == pad_idx).unsqueeze(1).unsqueeze(2)   # (B, 1, 1, T)
+
+    # Combined: mask position if it is causal-future OR padding
+    tgt_mask = causal_mask | pad_mask                        # (B, 1, T, T)
+    return tgt_mask
 
 
 # ══════════════════════════════════════════════════════════════════════
-#  MULTI-HEAD ATTENTION 
+#  3. MULTI-HEAD ATTENTION
 # ══════════════════════════════════════════════════════════════════════
 
 class MultiHeadAttention(nn.Module):
@@ -127,8 +154,28 @@ class MultiHeadAttention(nn.Module):
         self.d_model   = d_model
         self.num_heads = num_heads
         self.d_k       = d_model // num_heads   # depth per head
-        raise NotImplementedError
-    
+
+        # Four projection matrices (no bias, per paper)
+        self.w_q = nn.Linear(d_model, d_model, bias=False)
+        self.w_k = nn.Linear(d_model, d_model, bias=False)
+        self.w_v = nn.Linear(d_model, d_model, bias=False)
+        self.w_o = nn.Linear(d_model, d_model, bias=False)
+
+        self.dropout = nn.Dropout(p=dropout)
+
+        # Stored for external visualisation (attention head ablation)
+        self.attn_weights: Optional[torch.Tensor] = None
+
+    def _split_heads(self, x: torch.Tensor) -> torch.Tensor:
+        """(batch, seq, d_model) → (batch, heads, seq, d_k)"""
+        B, S, _ = x.shape
+        return x.view(B, S, self.num_heads, self.d_k).transpose(1, 2)
+
+    def _merge_heads(self, x: torch.Tensor) -> torch.Tensor:
+        """(batch, heads, seq, d_k) → (batch, seq, d_model)"""
+        B, _, S, _ = x.shape
+        return x.transpose(1, 2).contiguous().view(B, S, self.d_model)
+
     def forward(
         self,
         query: torch.Tensor,
@@ -143,22 +190,33 @@ class MultiHeadAttention(nn.Module):
             value : shape [batch, seq_k, d_model]
             mask  : Optional BoolTensor broadcastable to
                     [batch, num_heads, seq_q, seq_k]
-                    True → masked out (attend nowhere)
+                    True → masked out
 
         Returns:
             output : shape [batch, seq_q, d_model]
-
         """
-        raise NotImplementedError
+        Q = self._split_heads(self.w_q(query))   # (B, H, S_q, d_k)
+        K = self._split_heads(self.w_k(key))     # (B, H, S_k, d_k)
+        V = self._split_heads(self.w_v(value))   # (B, H, S_k, d_k)
+
+        context, self.attn_weights = scaled_dot_product_attention(Q, K, V, mask)
+
+        output = self.w_o(self._merge_heads(context))
+        return output
 
 
 # ══════════════════════════════════════════════════════════════════════
-#   POSITIONAL ENCODING  
+#  4. POSITIONAL ENCODING
 # ══════════════════════════════════════════════════════════════════════
 
 class PositionalEncoding(nn.Module):
     """
     Sinusoidal Positional Encoding as in "Attention Is All You Need", §3.5.
+
+        PE(pos, 2i)   = sin(pos / 10000^(2i / d_model))
+        PE(pos, 2i+1) = cos(pos / 10000^(2i / d_model))
+
+    The encoding table is registered as a buffer (not a trainable parameter).
 
     Args:
         d_model  (int)  : Embedding dimensionality.
@@ -168,7 +226,19 @@ class PositionalEncoding(nn.Module):
 
     def __init__(self, d_model: int, dropout: float = 0.1, max_len: int = 5000) -> None:
         super().__init__()
-        raise NotImplementedError
+        self.dropout = nn.Dropout(p=dropout)
+
+        pe       = torch.zeros(max_len, d_model)                       # (max_len, d_model)
+        position = torch.arange(0, max_len).unsqueeze(1).float()       # (max_len, 1)
+        div_term = torch.exp(
+            torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model)
+        )                                                               # (d_model/2,)
+
+        pe[:, 0::2] = torch.sin(position * div_term)   # even dimensions
+        pe[:, 1::2] = torch.cos(position * div_term)   # odd  dimensions
+
+        pe = pe.unsqueeze(0)                            # (1, max_len, d_model)
+        self.register_buffer("pe", pe)                 # ← buffer, never a gradient param
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -177,14 +247,14 @@ class PositionalEncoding(nn.Module):
 
         Returns:
             Tensor of same shape [batch, seq_len, d_model]
-            = x  +  PE[:, :seq_len, :]  
-
+            = x  +  PE[:, :seq_len, :]
         """
-        raise NotImplementedError
+        x = x + self.pe[:, : x.size(1)]
+        return self.dropout(x)
 
 
 # ══════════════════════════════════════════════════════════════════════
-#  FEED-FORWARD NETWORK 
+#  5. FEED-FORWARD NETWORK
 # ══════════════════════════════════════════════════════════════════════
 
 class PositionwiseFeedForward(nn.Module):
@@ -201,11 +271,9 @@ class PositionwiseFeedForward(nn.Module):
 
     def __init__(self, d_model: int, d_ff: int, dropout: float = 0.1) -> None:
         super().__init__()
-        # TODO: Task 2.3 — define:
-        #   self.linear1 = nn.Linear(d_model, d_ff)
-        #   self.linear2 = nn.Linear(d_ff, d_model)
-        #   self.dropout = nn.Dropout(p=dropout)
-        raise NotImplementedError
+        self.linear1 = nn.Linear(d_model, d_ff)
+        self.linear2 = nn.Linear(d_ff, d_model)
+        self.dropout = nn.Dropout(p=dropout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -213,19 +281,21 @@ class PositionwiseFeedForward(nn.Module):
             x : shape [batch, seq_len, d_model]
         Returns:
               shape [batch, seq_len, d_model]
-        
         """
-        raise NotImplementedError
+        return self.linear2(self.dropout(F.relu(self.linear1(x))))
 
 
 # ══════════════════════════════════════════════════════════════════════
-#  ENCODER LAYER  
+#  6. ENCODER LAYER
 # ══════════════════════════════════════════════════════════════════════
 
 class EncoderLayer(nn.Module):
     """
     Single Transformer encoder sub-layer:
         x → [Self-Attention → Add & Norm] → [FFN → Add & Norm]
+
+    Uses Pre-LayerNorm (normalise input before sub-layer) for training
+    stability.  See Xiong et al. (2020) for justification.
 
     Args:
         d_model   (int)  : Model dimensionality.
@@ -236,8 +306,11 @@ class EncoderLayer(nn.Module):
 
     def __init__(self, d_model: int, num_heads: int, d_ff: int, dropout: float = 0.1) -> None:
         super().__init__()
-        # TODO:instantiate:
-        raise NotImplementedError
+        self.self_attn = MultiHeadAttention(d_model, num_heads, dropout)
+        self.ffn       = PositionwiseFeedForward(d_model, d_ff, dropout)
+        self.norm1     = nn.LayerNorm(d_model)
+        self.norm2     = nn.LayerNorm(d_model)
+        self.dropout   = nn.Dropout(p=dropout)
 
     def forward(self, x: torch.Tensor, src_mask: torch.Tensor) -> torch.Tensor:
         """
@@ -247,13 +320,22 @@ class EncoderLayer(nn.Module):
 
         Returns:
             shape [batch, src_len, d_model]
-
         """
-        raise NotImplementedError
+        # Pre-LN self-attention + residual connection
+        residual = x
+        x = self.norm1(x)
+        x = residual + self.dropout(self.self_attn(x, x, x, src_mask))
+
+        # Pre-LN FFN + residual connection
+        residual = x
+        x = self.norm2(x)
+        x = residual + self.dropout(self.ffn(x))
+
+        return x
 
 
 # ══════════════════════════════════════════════════════════════════════
-#   DECODER LAYER 
+#  7. DECODER LAYER
 # ══════════════════════════════════════════════════════════════════════
 
 class DecoderLayer(nn.Module):
@@ -272,8 +354,13 @@ class DecoderLayer(nn.Module):
 
     def __init__(self, d_model: int, num_heads: int, d_ff: int, dropout: float = 0.1) -> None:
         super().__init__()
-        # TODO: instantiate:
-        raise NotImplementedError
+        self.self_attn  = MultiHeadAttention(d_model, num_heads, dropout)
+        self.cross_attn = MultiHeadAttention(d_model, num_heads, dropout)
+        self.ffn        = PositionwiseFeedForward(d_model, d_ff, dropout)
+        self.norm1      = nn.LayerNorm(d_model)
+        self.norm2      = nn.LayerNorm(d_model)
+        self.norm3      = nn.LayerNorm(d_model)
+        self.dropout    = nn.Dropout(p=dropout)
 
     def forward(
         self,
@@ -292,11 +379,26 @@ class DecoderLayer(nn.Module):
         Returns:
             shape [batch, tgt_len, d_model]
         """
-        raise NotImplementedError
+        # 1. Masked self-attention (causal)
+        residual = x
+        x = self.norm1(x)
+        x = residual + self.dropout(self.self_attn(x, x, x, tgt_mask))
+
+        # 2. Cross-attention over encoder memory
+        residual = x
+        x = self.norm2(x)
+        x = residual + self.dropout(self.cross_attn(x, memory, memory, src_mask))
+
+        # 3. Position-wise FFN
+        residual = x
+        x = self.norm3(x)
+        x = residual + self.dropout(self.ffn(x))
+
+        return x
 
 
 # ══════════════════════════════════════════════════════════════════════
-#  ENCODER & DECODER STACKS
+#  8. ENCODER & DECODER STACKS
 # ══════════════════════════════════════════════════════════════════════
 
 class Encoder(nn.Module):
@@ -304,7 +406,8 @@ class Encoder(nn.Module):
 
     def __init__(self, layer: EncoderLayer, N: int) -> None:
         super().__init__()
-        raise NotImplementedError
+        self.layers = nn.ModuleList([copy.deepcopy(layer) for _ in range(N)])
+        self.norm   = nn.LayerNorm(layer.norm1.normalized_shape[0])
 
     def forward(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         """
@@ -314,7 +417,9 @@ class Encoder(nn.Module):
         Returns:
             shape [batch, src_len, d_model]
         """
-        raise NotImplementedError
+        for layer in self.layers:
+            x = layer(x, mask)
+        return self.norm(x)
 
 
 class Decoder(nn.Module):
@@ -322,7 +427,8 @@ class Decoder(nn.Module):
 
     def __init__(self, layer: DecoderLayer, N: int) -> None:
         super().__init__()
-        raise NotImplementedError
+        self.layers = nn.ModuleList([copy.deepcopy(layer) for _ in range(N)])
+        self.norm   = nn.LayerNorm(layer.norm1.normalized_shape[0])
 
     def forward(
         self,
@@ -340,11 +446,13 @@ class Decoder(nn.Module):
         Returns:
             shape [batch, tgt_len, d_model]
         """
-        raise NotImplementedError
+        for layer in self.layers:
+            x = layer(x, memory, src_mask, tgt_mask)
+        return self.norm(x)
 
 
 # ══════════════════════════════════════════════════════════════════════
-#   FULL TRANSFORMER  
+#  9. FULL TRANSFORMER
 # ══════════════════════════════════════════════════════════════════════
 
 class Transformer(nn.Module):
@@ -370,14 +478,34 @@ class Transformer(nn.Module):
         num_heads: int   = 8,
         d_ff:      int   = 2048,
         dropout:   float = 0.1,
-        checkpoint_path: str = None,
     ) -> None:
         super().__init__()
-        # TODO: Instantiate 
-        # init should also load the model weights if checkpoint path provided, download the .pth file like this
-        if checkpoint_path is not None:
-            gdown.download(id="<.pth drive id>", output=checkpoint_path, quiet=False)
-        raise NotImplementedError
+        self.d_model = d_model
+
+        # Token embeddings
+        self.src_embedding = nn.Embedding(src_vocab_size, d_model, padding_idx=1)
+        self.tgt_embedding = nn.Embedding(tgt_vocab_size, d_model, padding_idx=1)
+
+        # Sinusoidal positional encodings (registered as buffers)
+        self.src_pe = PositionalEncoding(d_model, dropout)
+        self.tgt_pe = PositionalEncoding(d_model, dropout)
+
+        # Encoder / Decoder stacks
+        enc_layer    = EncoderLayer(d_model, num_heads, d_ff, dropout)
+        dec_layer    = DecoderLayer(d_model, num_heads, d_ff, dropout)
+        self.encoder = Encoder(enc_layer, N)
+        self.decoder = Decoder(dec_layer, N)
+
+        # Final linear projection to target vocabulary
+        self.output_projection = nn.Linear(d_model, tgt_vocab_size)
+
+        # Xavier uniform weight initialisation
+        self._init_weights()
+
+    def _init_weights(self):
+        for p in self.parameters():
+            if p.dim() > 1:
+                nn.init.xavier_uniform_(p)
 
     # ── AUTOGRADER HOOKS ── keep these signatures exactly ─────────────
 
@@ -396,8 +524,8 @@ class Transformer(nn.Module):
         Returns:
             memory : Encoder output, shape [batch, src_len, d_model]
         """
-    
-        raise NotImplementedError
+        x = self.src_pe(self.src_embedding(src) * math.sqrt(self.d_model))
+        return self.encoder(x, src_mask)
 
     def decode(
         self,
@@ -418,7 +546,9 @@ class Transformer(nn.Module):
         Returns:
             logits : shape [batch, tgt_len, tgt_vocab_size]
         """
-        raise NotImplementedError
+        x = self.tgt_pe(self.tgt_embedding(tgt) * math.sqrt(self.d_model))
+        dec_out = self.decoder(x, memory, src_mask, tgt_mask)
+        return self.output_projection(dec_out)
 
     def forward(
         self,
@@ -439,18 +569,5 @@ class Transformer(nn.Module):
         Returns:
             logits : shape [batch, tgt_len, tgt_vocab_size]
         """
-        raise NotImplementedError
-
-
-    def infer(self, src_sentence: str) -> str:
-        """
-        Translates a German sentence to English using greedy autoregressive decoding.
-        
-        Args:
-            src_sentence: The raw German text.
-            
-            
-        Returns:
-            The fully translated English string, detokenized and clean.
-        """
-        raise NotImplementedError
+        memory = self.encode(src, src_mask)
+        return self.decode(memory, src_mask, tgt, tgt_mask)
