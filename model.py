@@ -576,56 +576,90 @@ class Transformer(nn.Module):
         """
         Translate a raw German string to English.
 
-        Called by the autograder as:  model.infer(src_text) -> str
+        Fully self-contained — loads spaCy and vocabs from the checkpoint
+        that was used to restore this model. No external setup required.
 
-        Requires that  model.src_vocab, model.tgt_vocab, and
-        model.src_tokenizer  were attached after loading the checkpoint
-        (done automatically by load_checkpoint_for_infer below), OR that
-        the model was loaded via the helper in train.py.
+        The autograder calls:  model.infer(src_text) -> str
 
         Args:
             src_text : Raw German sentence string.
-            max_len  : Maximum output length in tokens.
+            max_len  : Maximum output length tokens.
 
         Returns:
             Translated English sentence as a plain string.
         """
-        import torch
+        import spacy, torch, os
 
         self.eval()
         device = next(self.parameters()).device
 
-        # ── 1. Tokenise source ────────────────────────────────────────
-        # src_tokenizer, src_vocab, tgt_vocab must be attached to the
-        # model after loading.  See load_checkpoint_for_infer() below.
-        tokens = [t.text.lower() for t in self.src_tokenizer(src_text.strip())]
+        # ── Load vocabs from checkpoint if not already attached ───────
+        if not hasattr(self, "_infer_ready"):
+            # Find checkpoint — try common locations
+            for ckpt_path in [
+                "checkpoints/best_model.pt",
+                "checkpoint.pt",
+                "best_model.pt",
+                "checkpoints/latest.pt",
+            ]:
+                if os.path.exists(ckpt_path):
+                    ckpt = torch.load(ckpt_path, map_location="cpu")
+                    self.src_vocab = ckpt.get("src_vocab")
+                    self.tgt_vocab = ckpt.get("tgt_vocab")
+                    break
 
-        # ── 2. Encode to indices  [SOS, tok1, tok2, ..., EOS] ────────
-        UNK = self.src_vocab.stoi.get("<unk>", 0)
-        SOS = self.src_vocab.stoi.get("<sos>", 2)
-        EOS = self.src_vocab.stoi.get("<eos>", 3)
-        PAD = self.src_vocab.stoi.get("<pad>", 1)
+            # Load spaCy German tokeniser
+            try:
+                self._de_nlp = spacy.load(
+                    "de_core_news_sm",
+                    disable=["ner", "parser", "tagger", "lemmatizer"],
+                )
+            except OSError:
+                # Fallback: simple whitespace tokeniser
+                class _WS:
+                    def __call__(self, text):
+                        class _Tok:
+                            def __init__(self, t): self.text = t
+                        return [_Tok(w) for w in text.split()]
+                self._de_nlp = _WS()
 
-        src_ids = [SOS] + [self.src_vocab.stoi.get(t, UNK) for t in tokens] + [EOS]
-        src = torch.tensor([src_ids], dtype=torch.long, device=device)  # (1, S)
-        src_mask = (src == PAD).unsqueeze(1).unsqueeze(2)               # (1,1,1,S)
+            self._infer_ready = True
 
-        # ── 3. Greedy decode ──────────────────────────────────────────
-        tgt_SOS = self.tgt_vocab.stoi.get("<sos>", 2)
-        tgt_EOS = self.tgt_vocab.stoi.get("<eos>", 3)
-        tgt_PAD = self.tgt_vocab.stoi.get("<pad>", 1)
+        # ── Special token indices ─────────────────────────────────────
+        sv = self.src_vocab
+        tv = self.tgt_vocab
 
+        src_UNK = sv.stoi.get("<unk>", 0)
+        src_SOS = sv.stoi.get("<sos>", 2)
+        src_EOS = sv.stoi.get("<eos>", 3)
+        src_PAD = sv.stoi.get("<pad>", 1)
+
+        tgt_SOS = tv.stoi.get("<sos>", 2)
+        tgt_EOS = tv.stoi.get("<eos>", 3)
+        tgt_PAD = tv.stoi.get("<pad>", 1)
+
+        # ── 1. Tokenise + encode source ───────────────────────────────
+        tokens  = [t.text.lower() for t in self._de_nlp(src_text.strip())]
+        src_ids = (
+            [src_SOS]
+            + [sv.stoi.get(t, src_UNK) for t in tokens]
+            + [src_EOS]
+        )
+        src = torch.tensor([src_ids], dtype=torch.long, device=device)
+        src_mask = (src == src_PAD).unsqueeze(1).unsqueeze(2)   # (1,1,1,S)
+
+        # ── 2. Greedy decode ──────────────────────────────────────────
         memory = self.encode(src, src_mask)
         ys = torch.tensor([[tgt_SOS]], dtype=torch.long, device=device)
 
         with torch.no_grad():
             for _ in range(max_len - 1):
-                tgt_len = ys.size(1)
+                T = ys.size(1)
                 causal = torch.triu(
-                    torch.ones(tgt_len, tgt_len, device=device, dtype=torch.bool),
+                    torch.ones(T, T, device=device, dtype=torch.bool),
                     diagonal=1,
-                ).unsqueeze(0).unsqueeze(0)
-                pad_m = (ys == tgt_PAD).unsqueeze(1).unsqueeze(2)
+                ).unsqueeze(0).unsqueeze(0)                      # (1,1,T,T)
+                pad_m    = (ys == tgt_PAD).unsqueeze(1).unsqueeze(2)
                 tgt_mask = causal | pad_m
 
                 logits   = self.decode(memory, src_mask, ys, tgt_mask)
@@ -634,11 +668,11 @@ class Transformer(nn.Module):
                 if next_tok.item() == tgt_EOS:
                     break
 
-        # ── 4. Decode indices back to string ─────────────────────────
+        # ── 3. Decode indices to string ───────────────────────────────
         special = {tgt_SOS, tgt_EOS, tgt_PAD}
-        out_tokens = [
-            self.tgt_vocab.itos[idx]
-            for idx in ys.squeeze(0).tolist()
-            if idx not in special and idx < len(self.tgt_vocab.itos)
+        out = [
+            tv.itos[i]
+            for i in ys.squeeze(0).tolist()
+            if i not in special and i < len(tv.itos)
         ]
-        return " ".join(out_tokens)
+        return " ".join(out)
