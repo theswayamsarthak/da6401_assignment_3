@@ -359,7 +359,14 @@ class Transformer(nn.Module):
     def _load(self, path: str) -> None:
         """Load weights and vocabs from checkpoint file."""
         self._download(path)
-        ckpt = torch.load(path, map_location="cpu")
+        # weights_only=False needed because checkpoint stores
+        # custom Vocabulary objects (PyTorch 2.6 default changed to True)
+        try:
+            from dataset import Vocabulary
+            torch.serialization.add_safe_globals([Vocabulary])
+            ckpt = torch.load(path, map_location="cpu", weights_only=False)
+        except Exception:
+            ckpt = torch.load(path, map_location="cpu", weights_only=False)
 
         # Resize embeddings/projection if checkpoint vocab sizes differ
         cfg    = ckpt.get("model_config", {})
