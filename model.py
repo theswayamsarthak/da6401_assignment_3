@@ -17,12 +17,31 @@ AUTOGRADER CONTRACT (DO NOT MODIFY SIGNATURES):
 import math
 import copy
 import os
+import sys
+import subprocess
 import gdown
 from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+
+# ── Auto-install de_core_news_sm at import time if missing ───────────
+def _ensure_de_model():
+    try:
+        import spacy
+        spacy.load("de_core_news_sm", disable=["ner","parser","tagger","lemmatizer"])
+    except OSError:
+        try:
+            subprocess.run(
+                [sys.executable, "-m", "spacy", "download", "de_core_news_sm"],
+                check=True, capture_output=True, timeout=120
+            )
+        except Exception:
+            pass  # Will fall back to whitespace tokeniser
+
+_ensure_de_model()
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -348,19 +367,7 @@ class Transformer(nn.Module):
         self._ready    = True
 
         # Load spaCy immediately so infer() has zero setup cost
-        try:
-            import spacy as _spacy
-            self._de_nlp = _spacy.load(
-                "de_core_news_sm",
-                disable=["ner", "parser", "tagger", "lemmatizer"],
-            )
-        except Exception:
-            class _WS:
-                def __call__(self, text):
-                    class _T:
-                        def __init__(self, w): self.text = w
-                    return [_T(w) for w in text.split()]
-            self._de_nlp = _WS()
+        self._de_nlp = self._load_spacy()
 
     # ── Download + load weights ───────────────────────────────────────
 
@@ -402,6 +409,38 @@ class Transformer(nn.Module):
     def _ensure_ready(self) -> None:
         """No-op — everything is loaded in __init__."""
         pass
+
+    @staticmethod
+    def _load_spacy():
+        """Load de_core_news_sm, installing it if necessary."""
+        import subprocess, sys
+        try:
+            import spacy as _spacy
+            try:
+                return _spacy.load(
+                    "de_core_news_sm",
+                    disable=["ner", "parser", "tagger", "lemmatizer"],
+                )
+            except OSError:
+                # Model not downloaded — install it now
+                subprocess.run(
+                    [sys.executable, "-m", "spacy", "download", "de_core_news_sm"],
+                    check=True, capture_output=True
+                )
+                import importlib
+                importlib.invalidate_caches()
+                return _spacy.load(
+                    "de_core_news_sm",
+                    disable=["ner", "parser", "tagger", "lemmatizer"],
+                )
+        except Exception:
+            # Last resort: whitespace tokeniser
+            class _WS:
+                def __call__(self, text):
+                    class _T:
+                        def __init__(self, w): self.text = w
+                    return [_T(w) for w in text.split()]
+            return _WS()
 
     # ── AUTOGRADER HOOKS ──────────────────────────────────────────────
 
