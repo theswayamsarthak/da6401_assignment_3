@@ -291,16 +291,32 @@ class Transformer(nn.Module):
 
     def __init__(
         self,
-        src_vocab_size: int   = 8000,
-        tgt_vocab_size: int   = 8000,
-        d_model:        int   = 512,
-        N:              int   = 6,
+        src_vocab_size: int   = 7853,
+        tgt_vocab_size: int   = 5893,
+        d_model:        int   = 256,
+        N:              int   = 3,
         num_heads:      int   = 8,
-        d_ff:           int   = 2048,
+        d_ff:           int   = 512,
         dropout:        float = 0.1,
         checkpoint_path: str  = None,
     ) -> None:
         super().__init__()
+
+        # Download checkpoint first so we can read the exact config
+        ckpt_path = checkpoint_path if checkpoint_path is not None else _DEFAULT_CKPT
+        self._download(ckpt_path)
+        raw = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+        cfg = raw.get("model_config", {})
+
+        # Use config from checkpoint — overrides any defaults
+        src_vocab_size = cfg.get("src_vocab_size", src_vocab_size)
+        tgt_vocab_size = cfg.get("tgt_vocab_size", tgt_vocab_size)
+        d_model        = cfg.get("d_model",        d_model)
+        N              = cfg.get("N",              N)
+        num_heads      = cfg.get("num_heads",      num_heads)
+        d_ff           = cfg.get("d_ff",           d_ff)
+        dropout        = cfg.get("dropout",        dropout)
+
         self.d_model = d_model
 
         self.src_embedding     = nn.Embedding(src_vocab_size, d_model, padding_idx=1)
@@ -325,13 +341,11 @@ class Transformer(nn.Module):
         self._de_nlp   = None
         self._ready    = False
 
-        # Always download and load checkpoint on construction
-        # so infer() never has to wait for a download
-        if checkpoint_path is not None:
-            self._load(checkpoint_path)
-        else:
-            # Download immediately — autograder must have weights before infer()
-            self._load(_DEFAULT_CKPT)
+        # Load weights + vocabs from the already-downloaded checkpoint
+        self.load_state_dict(raw["model_state_dict"], strict=True)
+        self.src_vocab = raw.get("src_vocab")
+        self.tgt_vocab = raw.get("tgt_vocab")
+        self._ready    = True
 
         # Load spaCy immediately so infer() has zero setup cost
         try:
