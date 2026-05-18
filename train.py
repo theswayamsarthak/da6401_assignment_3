@@ -331,6 +331,8 @@ def save_checkpoint(
             "optimizer_state_dict": optimizer.state_dict(),
             "scheduler_state_dict": scheduler.state_dict() if scheduler else None,
             "model_config":         model_config,
+            "src_vocab":            getattr(model, "src_vocab", None),
+            "tgt_vocab":            getattr(model, "tgt_vocab", None),
         },
         path,
     )
@@ -434,6 +436,11 @@ def run_training_experiment() -> None:
         d_ff=cfg.d_ff,
         dropout=cfg.dropout,
     ).to(device)
+
+    # Attach vocabs so save_checkpoint can store them
+    # and model.infer() can tokenise without external setup
+    model.src_vocab = src_vocab
+    model.tgt_vocab = tgt_vocab
 
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Trainable parameters: {n_params:,}")
